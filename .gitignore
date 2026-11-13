@@ -1,0 +1,7 @@
+# Dirs
+.git/
+.zig-cache/
+zig-out/
+zig-pkg/
+.claude/
+
