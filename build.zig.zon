@@ -1,0 +1,12 @@
+.{
+    .name = .Audio,
+    .version = "0.0.0",
+    .fingerprint = 0xd9bc1991c896a859,
+    .minimum_zig_version = "0.16.0-dev.2676+4e2cec265",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
