@@ -414,7 +414,7 @@ test "mp3 encoded granules decode through the decoder's scale factor and Huffman
     const r = prng.random();
     for (0..400) |iter| {
         const mpeg1 = iter % 2 == 0;
-        const block_type: BlockType = @fromBackingInt(@intCast(iter / 2 % 4));
+        const block_type: BlockType = @fromBackingInt(@intCast((iter / 2) % 4));
         const row: usize = if (mpeg1) 5 else 2; // 44.1 / 22.05 kHz
         const edges = bandEdges(&T.scf_long[row]);
         var short_widths: [13]u8 = undefined;

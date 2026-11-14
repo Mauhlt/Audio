@@ -87,7 +87,7 @@ pub const Header = struct {
 
     pub fn sampleRateHz(h: []const u8) u32 {
         const hz = [3]u32{ 44100, 48000, 32000 };
-        return hz[sampleRateIdx(h)] >> @intFromBool(!isMpeg1(h)) >> @intFromBool(!isNotMpeg25(h));
+        return (hz[sampleRateIdx(h)] >> @intFromBool(!isMpeg1(h))) >> @intFromBool(!isNotMpeg25(h));
     }
 
     pub fn frameSamples(h: []const u8) u32 {

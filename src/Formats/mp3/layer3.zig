@@ -207,7 +207,7 @@ pub fn pow43(x_in: i32) f32 {
         mult = 16;
         x <<= 3;
     }
-    const sign: i32 = 2 * x & 64;
+    const sign: i32 = (2 * x) & 64;
     const frac: f32 = @as(f32, @floatFromInt((x & 63) - sign)) / @as(f32, @floatFromInt((x & ~@as(i32, 63)) + sign));
     return T.pow43[@intCast(16 + ((x + sign) >> 6))] * (1 + frac * ((4.0 / 3.0) + frac * (2.0 / 9.0))) * mult;
 }
@@ -370,7 +370,7 @@ pub fn stereoProcess(buf: *[1152]f32, ist_pos: *const [39]u8, sfb: []const u8, h
                 kr = T.pan[2 * ipos + 1];
             } else {
                 kl = 1;
-                kr = ldexpQ2(1, @intCast((ipos + 1) >> 1 << mpeg2_sh));
+                kr = ldexpQ2(1, @intCast(((ipos + 1) >> 1) << mpeg2_sh));
                 if (ipos & 1 != 0) {
                     kl = kr;
                     kr = 1;
