@@ -45,6 +45,7 @@ pub const Stream = struct {
         var first = sync.next(audio[start..]);
         if (first.len == 0) return Error.MissingFrame;
         start += first.skip;
+        first.skip = 0; // consumed: the frame loop below must not skip it again
         const hdr = audio[start..][0..4];
         var s: Stream = .{
             .start = start,
@@ -97,7 +98,8 @@ pub fn decodeInto(scratch: std.mem.Allocator, data: []const u8, inf: Info, out_b
     var pos: usize = 0;
     var t: u64 = 0; // sample index (per channel) in the untrimmed stream
     var written: usize = 0; // samples written to `out`
-    const keep_end = s.raw_frames - s.padding;
+    // the padding comes from the file: it may claim more samples than the frames hold
+    const keep_end = s.raw_frames -| s.padding;
     while (pos < audio.len and written < out.len) {
         var fi: decoder.FrameInfo = undefined;
         const n = dec.decodeFrame(audio[pos..], &pcm, &fi);
@@ -161,7 +163,9 @@ fn trailingTagsStart(data: []const u8, min: usize) usize {
     if (end - min > 128 and std.mem.eql(u8, data[end - 128 ..][0..3], "TAG")) end -= 128;
     if (end - min > 32 and std.mem.eql(u8, data[end - 32 ..][0..8], "APETAGEX")) {
         const tag_size = std.mem.readInt(u32, data[end - 32 + 12 ..][0..4], .little);
-        if (32 + @as(u64, tag_size) < end - min) end -= 32 + tag_size;
+        // in u64: `32 + tag_size` overflows u32 for sizes near 4 GiB
+        const total = 32 + @as(u64, tag_size);
+        if (total < end - min) end -= @intCast(total);
     }
     return end;
 }
@@ -204,4 +208,12 @@ test "skip tags" {
     var buf: [300]u8 = @splat(0);
     @memcpy(buf[300 - 128 ..][0..3], "TAG");
     try std.testing.expectEqual(@as(usize, 172), trailingTagsStart(&buf, 0));
+
+    // APEv2 footer: a size that fits is cut off, one that claims ~4 GiB is ignored
+    var ape: [300]u8 = @splat(0);
+    @memcpy(ape[300 - 32 ..][0..8], "APETAGEX");
+    std.mem.writeInt(u32, ape[300 - 32 + 12 ..][0..4], 100, .little);
+    try std.testing.expectEqual(@as(usize, 300 - 132), trailingTagsStart(&ape, 0));
+    std.mem.writeInt(u32, ape[300 - 32 + 12 ..][0..4], 0xFFFF_FFFF, .little);
+    try std.testing.expectEqual(@as(usize, 300), trailingTagsStart(&ape, 0));
 }

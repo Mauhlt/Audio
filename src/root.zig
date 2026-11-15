@@ -421,6 +421,63 @@ test "MP3 - LAME gapless info and tags" {
     try std.testing.expect(d.max < 1e-5);
 }
 
+// The LAME padding is read from the file: a padding larger than the samples the frames hold
+// must not underflow (it used to panic in Debug / ReleaseSafe).
+test "MP3 - gapless padding larger than the stream" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const data = try testReadBytes(io, gpa, "src/Data/Read/Music128.mp3");
+    defer gpa.free(data);
+
+    var info_frame: [417]u8 = @splat(0);
+    @memcpy(info_frame[0..4], data[0..4]);
+    const p = 4 + 32;
+    @memcpy(info_frame[p..][0..4], "Info");
+    @memcpy(info_frame[p + 8 ..][0..9], "LAME3.100");
+    // delay 0, padding 0xFFF (4095 - 529 = 3566 samples, more than one 1152-sample frame)
+    info_frame[p + 8 + 21] = 0;
+    info_frame[p + 8 + 22] = 0x0F;
+    info_frame[p + 8 + 23] = 0xFF;
+    var sync: @import("Formats/mp3/header.zig").Sync = .{};
+    const first = sync.next(data);
+    try std.testing.expect(first.len != 0);
+    const file = try std.mem.concat(gpa, u8, &.{ &info_frame, data[0 .. first.skip + first.len] });
+    defer gpa.free(file);
+
+    const a = try decode(.mp3, gpa, file);
+    defer a.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), a.frames());
+}
+
+// Junk before the first frame (no Xing/Info frame) is skipped once: it used to be skipped
+// twice, which miscounted the frames and could index past the end of a short file.
+test "MP3 - junk before the first frame" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const data = try testReadBytes(io, gpa, "src/Data/Read/Music128.mp3");
+    defer gpa.free(data);
+    const junk: [300]u8 = @splat(0x55);
+
+    // a junk-prefixed file cut after its first frame: the second skip ran past the end
+    var sync: @import("Formats/mp3/header.zig").Sync = .{};
+    const first = sync.next(data);
+    const short = try std.mem.concat(gpa, u8, &.{ &junk, data[0 .. first.len + 100] });
+    defer gpa.free(short);
+    if (decode(.mp3, gpa, short)) |s| s.deinit(gpa) else |_| {}
+
+    // the whole file: same frame count and samples as without the junk
+    const clean = try MP3.info(data);
+    const file = try std.mem.concat(gpa, u8, &.{ &junk, data });
+    defer gpa.free(file);
+    const inf = try MP3.info(file);
+    try std.testing.expectEqual(clean.frames, inf.frames);
+    const a = try decode(.mp3, gpa, file);
+    defer a.deinit(gpa);
+    const b = try decode(.mp3, gpa, data);
+    defer b.deinit(gpa);
+    try std.testing.expectEqualSlices(u8, b.samples.asBytes(), a.samples.asBytes());
+}
+
 // Damaged files must fail with an error (or decode garbage), never crash: run in Debug
 // so every slice access is bounds checked.
 test "corrupt files never crash" {

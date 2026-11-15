@@ -115,7 +115,12 @@ fn parseFmt(chunk: []const u8) !Header {
     if (bits == 0 or valid_bits > bits) return Error.InvalidBitsPerSample;
     // Some writers store e.g. 20 bits in 3 bytes but report bits=20: trust block_align.
     if (block_align == 0 or block_align % channels != 0) return Error.InvalidBlockAlign;
-    const container: u16 = (block_align / channels) * 8;
+    // Bytes per sample, in u32: `(block_align / channels) * 8` overflows u16 from 8 KiB per
+    // sample (Debug: panic; ReleaseFast: wraps, e.g. 0x2001 bytes -> an 8-bit container).
+    // No sample type is wider than 8 bytes (f64).
+    const per: u32 = block_align / channels;
+    if (per == 0 or per > 8) return Error.InvalidBlockAlign;
+    const container: u16 = @intCast(per * 8);
     if (container < bits) return Error.InvalidBlockAlign;
     return .{
         .format = format,
@@ -163,4 +168,21 @@ test "WAV header - edge cases" {
     try std.testing.expectError(Error.MissingFormatChunk, parse("RIFF\x00\x00\x00\x00WAVEdata\x00\x00\x00\x00"));
     try std.testing.expectError(Error.MissingDataChunk, parse("RIFF\x00\x00\x00\x00WAVE" ++
         "fmt \x10\x00\x00\x00\x01\x00\x01\x00\x44\xAC\x00\x00\x88\x58\x01\x00\x02\x00\x10\x00"));
+}
+
+test "WAV header - block_align too large for a sample" {
+    // fmt with block_align 0x2000, 1 channel: (0x2000 / 1) * 8 = 0x10000 does not fit u16
+    const fmt_2000 = "fmt \x10\x00\x00\x00\x01\x00\x01\x00\x44\xAC\x00\x00\x00\x00\x00\x00\x00\x20\x08\x00";
+    try std.testing.expectError(Error.InvalidBlockAlign, parse("RIFF\x00\x00\x00\x00WAVE" ++ fmt_2000 ++ "data\x00\x00\x00\x00"));
+    // 0x2001 bytes per sample wrapped to an 8-bit container in ReleaseFast: also rejected
+    const fmt_2001 = "fmt \x10\x00\x00\x00\x01\x00\x01\x00\x44\xAC\x00\x00\x00\x00\x00\x00\x01\x20\x08\x00";
+    try std.testing.expectError(Error.InvalidBlockAlign, parse("RIFF\x00\x00\x00\x00WAVE" ++ fmt_2001 ++ "data\x00\x00\x00\x00"));
+    // 9 bytes per sample: wider than any sample type
+    const fmt_9 = "fmt \x10\x00\x00\x00\x01\x00\x01\x00\x44\xAC\x00\x00\x00\x00\x00\x00\x09\x00\x08\x00";
+    try std.testing.expectError(Error.InvalidBlockAlign, parse("RIFF\x00\x00\x00\x00WAVE" ++ fmt_9 ++ "data\x00\x00\x00\x00"));
+    // 8 bytes per sample (f64) is the widest accepted
+    const fmt_8 = "fmt \x10\x00\x00\x00\x03\x00\x01\x00\x44\xAC\x00\x00\x00\x00\x00\x00\x08\x00\x40\x00";
+    const h = try parse("RIFF\x00\x00\x00\x00WAVE" ++ fmt_8 ++ "data\x00\x00\x00\x00");
+    try std.testing.expectEqual(@as(u16, 64), h.bits_per_sample);
+    try std.testing.expectEqual(SampleTag.f64, try h.sampleTag());
 }

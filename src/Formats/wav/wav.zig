@@ -53,6 +53,8 @@ pub fn encode(audio: *const Audio, w: *std.Io.Writer, gpa: std.mem.Allocator) !v
         else => @intCast(tag.bytesPerSample()),
     };
     const block_align = std.math.mul(u16, audio.channels, file_bytes) catch return Error.UnsupportedChannels;
+    // caller-supplied: rate * block_align can overflow the u32 field (checked before writing)
+    const byte_rate = std.math.mul(u32, audio.sample_rate, block_align) catch return Error.UnsupportedSampleRate;
     const data_len: u64 = @as(u64, audio.samples.len()) * file_bytes;
     const format: FormatCode = if (tag.isFloat()) .ieee_float else .pcm;
     const extensible = audio.channels > 2;
@@ -80,7 +82,7 @@ pub fn encode(audio: *const Audio, w: *std.Io.Writer, gpa: std.mem.Allocator) !v
     try w.writeInt(u16, @backingInt(if (extensible) .extensible else format), .little);
     try w.writeInt(u16, audio.channels, .little);
     try w.writeInt(u32, audio.sample_rate, .little);
-    try w.writeInt(u32, audio.sample_rate * block_align, .little);
+    try w.writeInt(u32, byte_rate, .little);
     try w.writeInt(u16, block_align, .little);
     try w.writeInt(u16, file_bytes * 8, .little);
     if (extensible) {
@@ -131,4 +133,15 @@ test "WAV - decode edge cases" {
     var out: [4]u8 align(2) = undefined;
     try decodeInto(std.testing.allocator, bytes, inf, &out);
     try std.testing.expectEqualSlices(i16, &.{ 1, -1 }, std.mem.bytesAsSlice(i16, &out));
+}
+
+test "WAV - encode rejects a byte rate that overflows u32" {
+    const gpa = std.testing.allocator;
+    var s = [_]f64{ 0, 0 };
+    // 0xFFFF_FFFF Hz * 16 bytes per frame (2 x f64) does not fit the u32 byte-rate field
+    const a: Audio = .{ .sample_rate = 0xFFFF_FFFF, .channels = 2, .samples = .{ .f64 = &s } };
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try std.testing.expectError(Error.UnsupportedSampleRate, encode(&a, &aw.writer, gpa));
+    try std.testing.expectEqual(@as(usize, 0), aw.written().len); // nothing written
 }
