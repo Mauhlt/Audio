@@ -201,8 +201,8 @@ test {
     inline for (.{ WAV, QOA, MP3 }) |C| std.testing.refAllDecls(C);
 }
 
-/// Test helper: max and mean absolute difference between two buffers, as floats.
-pub fn diff(a: Samples, b: Samples) struct { max: f64, mean: f64 } {
+/// Test helper (not API): max and mean absolute difference between two buffers, as floats.
+fn diff(a: Samples, b: Samples) struct { max: f64, mean: f64 } {
     std.debug.assert(a.len() == b.len());
     var max: f64 = 0;
     var total: f64 = 0;

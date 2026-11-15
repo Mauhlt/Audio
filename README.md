@@ -13,10 +13,18 @@ NEED TO SUPPLY YOUR OWN AUDIO OUTPUT FOR NOW.
 | MP3 (`.mp3`, `.mp2`, `.mp1`) | yes | yes | Decode: MPEG-1/2/2.5 Layer III (and Layer I/II) to f32, skips ID3v2/ID3v1/APE tags, trims LAME gapless delay/padding. Encode: CBR Layer III at every MPEG sample rate, mono / joint stereo, gapless Info frame (see below) |
 
 ## Usage
-`build.zig.zon`:
+`build.zig.zon` (a URL package pinned to a commit; `zig fetch --save=Audio
+git+https://github.com/Mauhlt/Audio#<commit>` writes this entry and its hash):
 ```zig
-.dependencies = .{ .Audio = .{ .path = "../Audio" } },
+.dependencies = .{
+    .Audio = .{
+        .url = "git+https://github.com/Mauhlt/Audio#<commit>",
+        .hash = "<hash printed by zig fetch>",
+    },
+},
 ```
+To build against a local checkout instead, without editing the manifest:
+`zig build --fork=../Audio`.
 `build.zig`:
 ```zig
 exe.root_module.addImport("Audio", b.dependency("Audio", .{}).module("Audio"));
@@ -93,6 +101,10 @@ checked against dr_mp3 (identical decodes) across MPEG versions, channel counts 
 One test is a compiler canary: "zig canary: vector @intCast i32 -> u8" reports SKIPPED while
 Zig 0.18.0-dev.4's LLVM backend at -O0 miscompiles that cast (see `narrow` in
 `Samples/samples.zig`, which works around it). After a Zig upgrade, check whether it passes.
+
+## Licence
+MIT (`LICENSE`). The MP3 decoder is a port of minimp3 (CC0) and the QOA code follows the
+reference `qoa.h` (MIT): see `THIRD_PARTY.md`.
 
 ## Goals
 1. Read Formats:

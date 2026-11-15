@@ -30,7 +30,3 @@ pub fn byteLen(self: @This()) !usize {
 pub fn seconds(self: @This()) f64 {
     return @as(f64, @floatFromInt(self.frames)) / @as(f64, @floatFromInt(self.sample_rate));
 }
-
-pub fn eqlShape(a: @This(), b: @This()) bool {
-    return a.sample_rate == b.sample_rate and a.channels == b.channels and a.frames == b.frames and a.tag == b.tag;
-}
