@@ -2,6 +2,9 @@
 
 `zig build bench`, ReleaseFast, median of 9 runs, i5-14400F (AVX2, so `N` = 32 bytes).
 Signal: 10 s of stereo 44.1 kHz (encode/decode rows), or the LAME-encoded test files (MP3 rows).
+Those MP3 files have since been removed from the repository (no recorded origin or licence);
+`zig build bench` now decodes MP3s it generates and encodes itself, so its MP3 rows are not
+comparable with the table below.
 Every vector path is bit-identical to the scalar code it replaced; the scalar code is kept as
 the test oracle (`Formats/qoa/scalar.zig`, `Formats/mp3/scalar.zig`, `convertScalar` in
 `Samples/samples.zig`), and "... matches the scalar oracle" tests compare them.

@@ -26,24 +26,24 @@ fn report(name: []const u8, ms: f64, audio_seconds: f64) void {
     std.debug.print("{s:<36} {d:>9.3} {d:>10.0}x\n", .{ name, ms, audio_seconds / (ms / 1000) });
 }
 
-/// 10 s of stereo 44.1 kHz "music": a few partials, an envelope and some noise.
-fn signal(gpa: std.mem.Allocator) !Audio {
-    const rate = 44100;
+/// 10 s of synthetic "music": a few partials, an envelope and some noise (seeded PRNG).
+fn signal(gpa: std.mem.Allocator, rate: u32, channels: u16) !Audio {
     const n = rate * SECONDS;
-    const s = try gpa.alloc(f32, n * 2);
+    const s = try gpa.alloc(f32, n * channels);
     var prng: std.Random.DefaultPrng = .init(1);
     const r = prng.random();
+    const rate_f: f32 = @floatFromInt(rate);
     for (0..n) |i| {
-        const t: f32 = @as(f32, @floatFromInt(i)) / rate;
+        const t: f32 = @as(f32, @floatFromInt(i)) / rate_f;
         const env = @exp(-@mod(t, 0.5) * 4);
-        for (0..2) |c| {
+        for (0..channels) |c| {
             const f: f32 = if (c == 0) 220 else 330;
             var v = 0.4 * env * @sin(2 * std.math.pi * f * t) + 0.2 * @sin(2 * std.math.pi * 2 * f * t + 1);
             v += 0.02 * (r.float(f32) - 0.5);
-            s[2 * i + c] = v;
+            s[channels * i + c] = v;
         }
     }
-    return .{ .sample_rate = rate, .channels = 2, .samples = .{ .f32 = s } };
+    return .{ .sample_rate = rate, .channels = channels, .samples = .{ .f32 = s } };
 }
 
 const ConvertCtx = struct { src: *const Audio, tag: Audio.SampleTag, gpa: std.mem.Allocator };
@@ -78,7 +78,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = std.heap.smp_allocator;
 
-    const f32_src = try signal(gpa);
+    const f32_src = try signal(gpa, 44100, 2);
     defer f32_src.deinit(gpa);
     const secs = f32_src.seconds();
     std.debug.print("{s:<36} {s:>9} {s:>11}\n", .{ "10 s stereo 44.1 kHz", "ms", "realtime" });
@@ -124,10 +124,18 @@ pub fn main(init: std.process.Init) !void {
         try benchDecode(io, gpa, "decode mp3 (ours, 128 kbps)", .mp3, data);
     }
 
-    // MP3 files written by LAME
-    for ([_][]const u8{ "src/Data/Read/Music128.mp3", "src/Data/Read/Music48k320.mp3", "src/Data/Read/MusicMono64.mp3" }) |path| {
-        const data = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited);
-        defer gpa.free(data);
-        try benchDecode(io, gpa, std.fs.path.basename(path), .mp3, data);
+    // MP3 decode at other rates / channel counts (generated, encoded by this library)
+    const mp3_cases = [_]struct { rate: u32, channels: u16, kbps: u16 }{
+        .{ .rate = 48000, .channels = 2, .kbps = 320 },
+        .{ .rate = 44100, .channels = 1, .kbps = 64 },
+    };
+    for (mp3_cases) |c| {
+        const src = try signal(gpa, c.rate, c.channels);
+        defer src.deinit(gpa);
+        out.clearRetainingCapacity();
+        try Audio.MP3.encodeWith(&src, &out.writer, gpa, .{ .bitrate_kbps = c.kbps });
+        var name_buf: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "decode mp3 ({} Hz {}ch {} kbps)", .{ c.rate, c.channels, c.kbps });
+        try benchDecode(io, gpa, name, .mp3, out.written());
     }
 }

@@ -20,8 +20,10 @@ pub fn build(b: *std.Build) void {
 
     const mod_tests = b.addTest(.{ .root_module = mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);
-    run_mod_tests.setCwd(b.path(".")); // tests read src/Data/... relative to the project root
-    run_mod_tests.has_side_effects = true; // reads/writes data files the cache doesn't track
+    // Test data is generated in memory; files the tests write go to std.testing.tmpDir
+    // (.zig-cache/tmp, relative to the working directory: the project root).
+    run_mod_tests.setCwd(b.path("."));
+    run_mod_tests.has_side_effects = true; // writes temporary files: always run, never cached
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
 

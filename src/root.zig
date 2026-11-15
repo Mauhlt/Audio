@@ -198,8 +198,12 @@ test {
     _ = @import("Formats/mp3/huffman.zig");
     _ = @import("Formats/mp3/quantize.zig");
     _ = @import("Formats/mp3/psy.zig");
+    _ = @import("testdata.zig");
     inline for (.{ WAV, QOA, MP3 }) |C| std.testing.refAllDecls(C);
 }
+
+// Test data is generated in memory (`testdata.zig`); the repository ships no audio files.
+const testdata = @import("testdata.zig");
 
 /// Test helper (not API): max and mean absolute difference between two buffers, as floats.
 fn diff(a: Samples, b: Samples) struct { max: f64, mean: f64 } {
@@ -214,26 +218,6 @@ fn diff(a: Samples, b: Samples) struct { max: f64, mean: f64 } {
     return .{ .max = max, .mean = if (a.len() == 0) 0 else total / @as(f64, @floatFromInt(a.len())) };
 }
 
-fn testRead(io: std.Io, gpa: std.mem.Allocator, path: []const u8) !Audio {
-    return read(.{ .io = io, .gpa = gpa, .filepath = path }) catch |err| {
-        std.debug.print("failed reading {s}: {t}\n", .{ path, err });
-        return err;
-    };
-}
-
-fn testTone(gpa: std.mem.Allocator, channels: u16, n_frames: usize) !Audio {
-    const s = try gpa.alloc(f64, n_frames * channels);
-    for (s, 0..) |*v, i| {
-        const t: f64 = @floatFromInt(i / channels);
-        const c: f64 = @floatFromInt(i % channels);
-        v.* = 0.6 * @sin(t * (0.02 + 0.01 * c)) + 0.3 * @sin(t * 0.37);
-    }
-    // full scale, to exercise clamping in the integer conversions
-    s[0] = 1.0;
-    if (s.len > 1) s[1] = -1.0;
-    return .{ .sample_rate = 44100, .channels = channels, .samples = .{ .f64 = s } };
-}
-
 // encode -> file -> decode, for every sample type WAV can store
 test "WAV - write round trip, every sample type" {
     const gpa = std.testing.allocator;
@@ -242,7 +226,7 @@ test "WAV - write round trip, every sample type" {
     defer tmp.cleanup();
 
     for ([_]u16{ 1, 2, 6 }) |channels| {
-        const tone = try testTone(gpa, channels, 1001);
+        const tone = try testdata.signal(gpa, 44100, channels, 1001, channels);
         defer tone.deinit(gpa);
         inline for (comptime std.enums.values(SampleTag)) |tag| {
             const a = try tone.convert(tag, gpa);
@@ -261,103 +245,190 @@ test "WAV - write round trip, every sample type" {
     }
 }
 
-// Reference files written by an independent encoder (Python) must decode to the same
-// samples as the 16-bit original.
-test "WAV - decode reference files" {
+// Files packed field by field (`testdata.packWav`, not this library's encoder) decode to exactly
+// the samples packed into them: every PCM / float layout, WAVE_FORMAT_EXTENSIBLE (also with
+// fewer valid bits than the container), RF64, odd-sized chunks and the data pad byte.
+test "WAV - decode hand-packed files" {
     const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    const ref = try testRead(io, gpa, "src/Data/Read/Tone16.wav");
-    defer ref.deinit(gpa);
-    try std.testing.expectEqual(@as(u32, 44100), ref.sample_rate);
-    try std.testing.expectEqual(@as(u16, 2), ref.channels);
-    const Case = struct { path: []const u8, tag: SampleTag, tol: f64 = 0, ref: ?[]const u8 = null };
-    const cases = [_]Case{
-        .{ .path = "src/Data/Read/Tone8.wav", .tag = .u8, .tol = 1.0 / 128.0 },
-        .{ .path = "src/Data/Read/Tone24.wav", .tag = .i24 },
-        .{ .path = "src/Data/Read/Tone32.wav", .tag = .i32 },
-        .{ .path = "src/Data/Read/ToneFloat32.wav", .tag = .f32 },
-        .{ .path = "src/Data/Read/ToneFloat64.wav", .tag = .f64 },
-        .{ .path = "src/Data/Read/Tone24Extensible.wav", .tag = .i24 },
-        // G.711 is lossy: compare against the reference decoder's output instead
-        .{ .path = "src/Data/Read/ToneMulaw.wav", .tag = .i16, .ref = "src/Data/Read/ToneMulaw.ref.wav" },
-        .{ .path = "src/Data/Read/ToneAlaw.wav", .tag = .i16, .ref = "src/Data/Read/ToneAlaw.ref.wav" },
-    };
-    for (cases) |case| {
-        const a = try testRead(io, gpa, case.path);
-        defer a.deinit(gpa);
-        const other = if (case.ref) |p| try testRead(io, gpa, p) else null;
-        defer if (other) |o| o.deinit(gpa);
-        const expected = other orelse ref;
-        try std.testing.expectEqual(case.tag, std.meta.activeTag(a.samples));
-        try std.testing.expectEqual(expected.channels, a.channels);
-        try std.testing.expectEqual(expected.samples.len(), a.samples.len());
-        const d = diff(expected.samples, a.samples);
-        if (d.max > case.tol) {
-            std.debug.print("{s}: max diff {d:.6} > {d:.6}\n", .{ case.path, d.max, case.tol });
-            return error.TestExpectedSimilar;
-        }
-    }
-}
-
-test "QOA - reference encoder file, and write round trip" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    // Tone.qoa was written by the reference qoa.h encoder; Tone.qoa.wav is its decode
-    const qoa = try testRead(io, gpa, "src/Data/Read/Tone.qoa");
-    defer qoa.deinit(gpa);
-    const ref = try testRead(io, gpa, "src/Data/Read/Tone.qoa.wav");
-    defer ref.deinit(gpa);
-    try std.testing.expectEqual(ref.sample_rate, qoa.sample_rate);
-    try std.testing.expectEqual(ref.channels, qoa.channels);
-    try std.testing.expectEqualSlices(u8, ref.samples.asBytes(), qoa.samples.asBytes());
-
-    // our encoder must produce byte-identical output to the reference encoder
-    const src = try testRead(io, gpa, "src/Data/Read/Tone16.wav");
+    const src = try testdata.signal(gpa, 44100, 3, 999, 1); // 3 x 999: odd data sizes
     defer src.deinit(gpa);
-    try src.write(io, gpa, "src/Data/Write/Tone.qoa");
-    var file = try std.Io.Dir.cwd().openFile(io, "src/Data/Write/Tone.qoa", .{});
-    defer file.close(io);
-    var ours: std.ArrayList(u8) = .empty;
-    defer ours.deinit(gpa);
-    _ = try misc.readFileInto(io, gpa, file, &ours);
-    var file2 = try std.Io.Dir.cwd().openFile(io, "src/Data/Read/Tone.qoa", .{});
-    defer file2.close(io);
-    var theirs: std.ArrayList(u8) = .empty;
-    defer theirs.deinit(gpa);
-    _ = try misc.readFileInto(io, gpa, file2, &theirs);
-    try std.testing.expectEqualSlices(u8, theirs.items, ours.items);
-}
-
-// MP3s encoded by LAME; references decoded by dr_mp3 (miniaudio) to f32.
-test "MP3 - decode matches reference decoder" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    const Case = struct { mp3: []const u8, ref: []const u8 };
+    const Case = struct { tag: SampleTag, code: u16, valid_bits: ?u16 = null, rf64: bool = false };
     const cases = [_]Case{
-        .{ .mp3 = "src/Data/Read/Music128.mp3", .ref = "src/Data/Read/Music128.mp3.wav" },
-        .{ .mp3 = "src/Data/Read/MusicVbr.mp3", .ref = "src/Data/Read/MusicVbr.mp3.wav" },
-        .{ .mp3 = "src/Data/Read/MusicMono64.mp3", .ref = "src/Data/Read/MusicMono64.mp3.wav" },
-        .{ .mp3 = "src/Data/Read/Music22k.mp3", .ref = "src/Data/Read/Music22k.mp3.wav" },
-        .{ .mp3 = "src/Data/Read/Music11k.mp3", .ref = "src/Data/Read/Music11k.mp3.wav" },
-        .{ .mp3 = "src/Data/Read/Music48k320.mp3", .ref = "src/Data/Read/Music48k320.mp3.wav" },
+        .{ .tag = .u8, .code = 1 },
+        .{ .tag = .i16, .code = 1 },
+        .{ .tag = .i24, .code = 1 },
+        .{ .tag = .i32, .code = 1 },
+        .{ .tag = .f32, .code = 3 },
+        .{ .tag = .f64, .code = 3 },
+        .{ .tag = .i24, .code = 1, .valid_bits = 24 },
+        .{ .tag = .i24, .code = 1, .valid_bits = 20 }, // 20 bits, left-justified in 3 bytes
+        .{ .tag = .f32, .code = 3, .valid_bits = 32 },
+        .{ .tag = .i16, .code = 1, .rf64 = true },
+        .{ .tag = .f64, .code = 3, .valid_bits = 64, .rf64 = true },
     };
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(gpa);
     for (cases) |case| {
-        const a = try testRead(io, gpa, case.mp3);
+        // quantize here (not with the library's conversions) and pack little-endian
+        const expected: Samples = try .alloc(case.tag, gpa, src.samples.len());
+        defer expected.deinit(gpa);
+        bytes.clearRetainingCapacity();
+        switch (expected) {
+            inline else => |e, t| for (e, src.samples.f64) |*d, x| {
+                const D = @TypeOf(d.*);
+                d.* = switch (t) {
+                    .u8 => @intFromFloat(@round(x * 127) + 128),
+                    .f32 => @floatCast(x),
+                    .f64 => x,
+                    .i16, .i24, .i32 => blk: {
+                        const bits: u6 = @intCast(case.valid_bits orelse @bitSizeOf(D));
+                        const full: f64 = @floatFromInt((@as(i64, 1) << (bits - 1)) - 1);
+                        const q: i64 = @intFromFloat(@round(x * full));
+                        break :blk @intCast(q << (@bitSizeOf(D) - bits));
+                    },
+                };
+                var le: [@bitSizeOf(D) / 8]u8 = undefined;
+                std.mem.writeInt(@Int(.unsigned, @bitSizeOf(D)), &le, @bitCast(d.*), .little);
+                try bytes.appendSlice(gpa, &le);
+            },
+        }
+        const file = try testdata.packWav(gpa, .{
+            .code = case.code,
+            .channels = src.channels,
+            .sample_rate = src.sample_rate,
+            .bytes = case.tag.bits() / 8, // file container: i24 takes 3 bytes
+            .valid_bits = case.valid_bits,
+            .rf64 = case.rf64,
+        }, bytes.items);
+        defer gpa.free(file);
+        const a = try decode(.wav, gpa, file);
         defer a.deinit(gpa);
-        const ref = try testRead(io, gpa, case.ref);
-        defer ref.deinit(gpa);
-        try std.testing.expectEqual(ref.sample_rate, a.sample_rate);
-        try std.testing.expectEqual(ref.channels, a.channels);
-        std.testing.expectEqual(ref.samples.len(), a.samples.len()) catch |err| {
-            std.debug.print("{s}: {} samples, reference has {}\n", .{ case.mp3, a.samples.len(), ref.samples.len() });
-            return err;
-        };
-        const d = diff(ref.samples, a.samples);
-        if (d.max > 1e-5) { // float rounding only: measured < 1e-6 on x86-64
-            std.debug.print("{s}: max diff {e} mean {e}\n", .{ case.mp3, d.max, d.mean });
-            return error.TestExpectedSimilar;
+        try std.testing.expectEqual(src.sample_rate, a.sample_rate);
+        try std.testing.expectEqual(src.channels, a.channels);
+        try std.testing.expectEqual(case.tag, std.meta.activeTag(a.samples));
+        try std.testing.expectEqual(expected.len(), a.samples.len());
+        const d = diff(expected, a.samples);
+        if (d.max != 0) {
+            std.debug.print("{t} (code {}, valid bits {?}, rf64 {}): max diff {e}\n", .{ case.tag, case.code, case.valid_bits, case.rf64, d.max });
+            return error.TestExpectedEqual;
         }
     }
+}
+
+// Every A-law / mu-law code, against the expansion written the way ITU-T G.711 tabulates it
+// (sign, 3-bit segment, 4-bit step), not the way `g711.zig` computes it.
+test "WAV - decode hand-packed G.711 files" {
+    const gpa = std.testing.allocator;
+    var codes: [2 * 256 + 2 * 61]u8 = undefined; // stereo: every code, then seeded random ones
+    for (codes[0..512], 0..) |*c, i| c.* = @truncate(i);
+    var prng: std.Random.DefaultPrng = .init(711);
+    prng.random().bytes(codes[512..]);
+    for ([_]u16{ 6, 7 }) |code| {
+        const file = try testdata.packWav(gpa, .{ .code = code, .channels = 2, .sample_rate = 8000, .bytes = 1 }, &codes);
+        defer gpa.free(file);
+        const a = try decode(.wav, gpa, file);
+        defer a.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, codes.len), a.samples.i16.len);
+        for (codes, a.samples.i16) |c, got| {
+            const want: i32 = if (code == 6) blk: { // A-law: even bits inverted, sign 1 = positive
+                const v = c ^ 0x55;
+                const seg: u5 = @intCast((v >> 4) & 7);
+                const step: i32 = v & 0x0F;
+                const mag = if (seg == 0) 2 * step + 1 else (2 * step + 33) << (seg - 1); // 12-bit
+                break :blk if (v & 0x80 != 0) 8 * mag else -8 * mag;
+            } else blk: { // mu-law: all bits inverted, sign 1 = negative
+                const v = ~c;
+                const seg: u5 = @intCast((v >> 4) & 7);
+                const step: i32 = v & 0x0F;
+                const mag = ((2 * step + 33) << seg) - 33; // 13-bit
+                break :blk if (v & 0x80 != 0) -4 * mag else 4 * mag;
+            };
+            try std.testing.expectEqual(want, got);
+        }
+    }
+}
+
+// The encoder against a whole-file oracle: the frame layout of the reference qoa.h written out
+// here, with every slice from `Formats/qoa/scalar.zig` (the line-by-line port of the reference
+// slice search) one channel at a time. Then through `write` / `read` on a file.
+test "QOA - encoder matches the scalar reference, write / read round trip" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const qh = @import("Formats/qoa/header.zig");
+    const scalar = @import("Formats/qoa/scalar.zig");
+    const Lms = @import("Formats/qoa/lms.zig").Lms;
+    const channels = 3;
+    const n_frames = 2 * qh.FRAME_LEN + 37; // the last frame ends in a short slice
+    const generated = try testdata.signal(gpa, 44100, channels, n_frames, 2);
+    defer generated.deinit(gpa);
+    const src = try generated.convert(.i16, gpa);
+    defer src.deinit(gpa);
+    const pcm = src.samples.i16;
+
+    var oracle: std.Io.Writer.Allocating = .init(gpa);
+    defer oracle.deinit();
+    const w = &oracle.writer;
+    try w.writeAll("qoaf");
+    try w.writeInt(u32, n_frames, .big);
+    var lms: [channels]Lms = @splat(Lms.initial);
+    var start: usize = 0;
+    while (start < n_frames) : (start += qh.FRAME_LEN) {
+        const len = @min(qh.FRAME_LEN, n_frames - start);
+        const slices = (len + qh.SLICE_LEN - 1) / qh.SLICE_LEN;
+        try w.writeInt(u8, channels, .big);
+        try w.writeInt(u24, 44100, .big);
+        try w.writeInt(u16, @intCast(len), .big);
+        try w.writeInt(u16, @intCast(8 + 16 * channels + 8 * slices * channels), .big);
+        for (lms) |l| {
+            try w.writeInt(u64, Lms.packed16(l.history), .big);
+            try w.writeInt(u64, Lms.packed16(l.weights), .big);
+        }
+        var prev_sf: [channels]usize = @splat(0); // the reference restarts the search per frame
+        var s: usize = 0;
+        while (s < len) : (s += qh.SLICE_LEN) {
+            const slice_len = @min(qh.SLICE_LEN, len - s);
+            for (0..channels) |c| {
+                const r = scalar.encodeSlice(pcm, (start + s) * channels + c, channels, slice_len, lms[c], prev_sf[c]);
+                lms[c] = r.lms;
+                prev_sf[c] = r.sf;
+                try w.writeInt(u64, r.slice << @intCast((qh.SLICE_LEN - slice_len) * 3), .big);
+            }
+        }
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fs.path.join(gpa, &.{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path, "t.qoa" });
+    defer gpa.free(path);
+    try src.write(io, gpa, path);
+    const ours = try tmp.dir.readFileAlloc(io, "t.qoa", gpa, .unlimited);
+    defer gpa.free(ours);
+    try std.testing.expectEqualSlices(u8, oracle.written(), ours);
+
+    const back = try read(.{ .io = io, .gpa = gpa, .dir = tmp.dir, .filepath = "t.qoa", .path_type = .dir });
+    defer back.deinit(gpa);
+    try std.testing.expectEqual(src.sample_rate, back.sample_rate);
+    try std.testing.expectEqual(src.channels, back.channels);
+    try std.testing.expectEqual(src.samples.len(), back.samples.len());
+    var sig: f64 = 0;
+    var noise: f64 = 0;
+    for (pcm, back.samples.i16) |a, b| {
+        const fa: f64 = @floatFromInt(a);
+        const d: f64 = @floatFromInt(@as(i32, a) - b);
+        sig += fa * fa;
+        noise += d * d;
+    }
+    try std.testing.expect(10 * @log10(sig / noise) > 25);
+}
+
+// SKIPPED, on purpose. This compared the decoder with dr_mp3's output on MP3s encoded by LAME
+// from music. Those files had no recorded origin or licence and were removed; replacing them
+// needs MP3s from an independent encoder and an independent decoder's output, which the tests
+// cannot produce in Zig without a second MP3 implementation. Still covered: the decoder's
+// kernels against the scalar oracles (layer3.zig, synth.zig), encode -> decode round trips with
+// SNR limits (below), and hand-built frames of every MPEG version and layer (silence).
+test "MP3 - decode matches reference decoder" {
+    return error.SkipZigTest;
 }
 
 test "decodeAny / unsupported formats" {
@@ -375,76 +446,153 @@ test "decodeAny / unsupported formats" {
     try std.testing.expectError(error.Unsupported, a.encode(.flac, &aw.writer, gpa));
 }
 
-fn testReadBytes(io: std.Io, gpa: std.mem.Allocator, path: []const u8) ![]u8 {
-    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(gpa);
-    _ = try misc.readFileInto(io, gpa, file, &buf);
-    return buf.toOwnedSlice(gpa);
+// Silent frames built from the standard (`testdata.silentFrame`): every MPEG version and layer,
+// mono / stereo, CRC, padding and free format. Header parsing and frame sync must find every
+// frame, and all-zero side info / allocation must decode to exact silence.
+test "MP3 - hand-built silent frames, every version and layer" {
+    const gpa = std.testing.allocator;
+    const cases = [_]testdata.Frame{
+        .{ .kbps = 128, .sample_rate = 44100, .padding = true },
+        .{ .kbps = 320, .sample_rate = 48000, .mono = true, .crc = true },
+        .{ .kbps = 32, .sample_rate = 32000 },
+        .{ .kbps = 0, .sample_rate = 44100, .free_bytes = 300 }, // free format
+        .{ .version = .mpeg2, .kbps = 64, .sample_rate = 22050 },
+        .{ .version = .mpeg2, .kbps = 32, .sample_rate = 24000, .mono = true, .crc = true },
+        .{ .version = .mpeg2, .kbps = 8, .sample_rate = 16000 },
+        .{ .version = .mpeg25, .kbps = 32, .sample_rate = 11025, .padding = true },
+        .{ .version = .mpeg25, .kbps = 16, .sample_rate = 12000, .mono = true },
+        .{ .version = .mpeg25, .kbps = 8, .sample_rate = 8000, .mono = true },
+        .{ .layer = 2, .kbps = 192, .sample_rate = 48000 },
+        .{ .layer = 2, .version = .mpeg2, .kbps = 64, .sample_rate = 24000, .mono = true },
+        .{ .layer = 1, .kbps = 384, .sample_rate = 44100, .padding = true },
+        .{ .layer = 1, .version = .mpeg2, .kbps = 32, .sample_rate = 16000, .mono = true, .crc = true },
+    };
+    const count = 12;
+    for (cases) |f| {
+        errdefer std.debug.print("failed: {any}\n", .{f});
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        for (0..count) |_| try testdata.silentFrame(&aw.writer, f);
+        const inf = try MP3.info(aw.written());
+        const a = try decode(.mp3, gpa, aw.written());
+        defer a.deinit(gpa);
+        try std.testing.expectEqual(f.sample_rate, a.sample_rate);
+        try std.testing.expectEqual(@as(u16, if (f.mono) 1 else 2), a.channels);
+        try std.testing.expectEqual(@as(u64, count * testdata.frameSamples(f)), inf.frames);
+        try std.testing.expectEqual(@as(usize, count * testdata.frameSamples(f)), a.frames());
+        for (a.samples.f32) |v| try std.testing.expectEqual(@as(f32, 0), v);
+    }
 }
 
-// A LAME "Info" frame (as written by `lame`) carries the encoder delay and padding.
-// Splice one, plus ID3v2 / ID3v1 tags, around a stream and check the trimmed output.
+/// Silent MPEG-1 Layer III stream at 48 kHz with everything around it a decoder must skip:
+/// ID3v2 (with footer), junk holding a fake frame header, a Xing frame (VBR, every optional
+/// field, `lame` delay / padding when given), frames whose bit rate changes every frame (VBR),
+/// then APEv2 and ID3v1 tags. `n_frames` silent frames of 1152 samples.
+fn taggedSilentStream(gpa: std.mem.Allocator, n_frames: usize, lame: ?[2]u12) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    errdefer aw.deinit();
+    const w = &aw.writer;
+    try testdata.id3v2(w, "TIT2 hand-built, not parsed", true);
+    var junk: [300]u8 = @splat(0x55);
+    // a header of the same stream: the frame after it is not where it says, so it is rejected
+    @memcpy(junk[10..][0..4], &testdata.mp3Header(.{ .kbps = 128, .sample_rate = 48000 }));
+    try w.writeAll(&junk);
+    try testdata.xingFrame(w, .{ .kbps = 128, .sample_rate = 48000 }, .{
+        .tag = "Xing",
+        .frames = @intCast(n_frames),
+        .bytes = 12345,
+        .toc = true,
+        .quality = 100,
+        .lame = if (lame) |l| .{ .delay = l[0], .padding = l[1] } else null,
+    });
+    const rates = [_]u16{ 64, 128, 320, 96, 32 };
+    for (0..n_frames) |i| try testdata.silentFrame(w, .{ .kbps = rates[i % rates.len], .sample_rate = 48000 });
+    try testdata.apev2(w);
+    try testdata.id3v1(w);
+    return aw.toOwnedSlice();
+}
+
+test "MP3 - hand-built tags, junk, Xing / LAME frame and VBR frame sizes" {
+    const gpa = std.testing.allocator;
+    const n_frames = 10;
+    for ([_]?[2]u12{ null, .{ 576, 1500 } }) |lame| {
+        const file = try taggedSilentStream(gpa, n_frames, lame);
+        defer gpa.free(file);
+        // the decoder adds 528 + 1 samples of delay to the encoder's
+        const trim: usize = if (lame) |l| (@as(usize, l[0]) + 529) + (@as(usize, l[1]) - 529) else 0;
+        const inf = try MP3.info(file);
+        try std.testing.expectEqual(@as(u32, 48000), inf.sample_rate);
+        try std.testing.expectEqual(@as(u16, 2), inf.channels);
+        try std.testing.expectEqual(@as(u64, n_frames * 1152 - trim), inf.frames);
+        const a = try decodeAny(gpa, file); // sniffed from the ID3v2 tag
+        defer a.deinit(gpa);
+        try std.testing.expectEqual(n_frames * 1152 - trim, a.frames());
+        for (a.samples.f32) |v| try std.testing.expectEqual(@as(f32, 0), v);
+    }
+}
+
+/// `n_frames` samples per channel of `testdata.signal` through this library's MP3 encoder,
+/// without its Info frame: audio frames only, so the decoder returns every sample they hold
+/// (no gapless trim).
+fn testMp3Frames(gpa: std.mem.Allocator, sample_rate: u32, channels: u16, kbps: u16, n_frames: usize) ![]u8 {
+    const src = try testdata.signal(gpa, sample_rate, channels, n_frames, sample_rate + kbps);
+    defer src.deinit(gpa);
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try MP3.encodeWith(&src, &aw.writer, gpa, .{ .bitrate_kbps = kbps });
+    return gpa.dupe(u8, testdata.withoutInfoFrame(aw.written()));
+}
+
+// A LAME "Info" / "Xing" frame carries the encoder delay and padding. Splice one, plus ID3v2,
+// APEv2 and ID3v1 tags, around a stream and check the trimmed output.
 test "MP3 - LAME gapless info and tags" {
     const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    const data = try testReadBytes(io, gpa, "src/Data/Read/Music128.mp3");
+    const data = try testMp3Frames(gpa, 44100, 2, 128, 44100 / 2);
     defer gpa.free(data);
-    const ref = try testRead(io, gpa, "src/Data/Read/Music128.mp3.wav");
+    const ref = try decode(.mp3, gpa, data); // every sample the frames hold
     defer ref.deinit(gpa);
 
-    var info_frame: [417]u8 = @splat(0); // 128 kbps @ 44.1 kHz, no padding
-    @memcpy(info_frame[0..4], data[0..4]);
-    try std.testing.expectEqual(@as(u8, 0), info_frame[2] & 2);
-    const p = 4 + 32; // MPEG-1 stereo side info
-    @memcpy(info_frame[p..][0..4], "Info"); // flags = 0: no optional fields
-    @memcpy(info_frame[p + 8 ..][0..9], "LAME3.100");
     const enc_delay = 576;
     const enc_padding = 1000;
-    info_frame[p + 8 + 21] = enc_delay >> 4;
-    info_frame[p + 8 + 22] = ((enc_delay & 0xF) << 4) | (enc_padding >> 8);
-    info_frame[p + 8 + 23] = enc_padding & 0xFF;
-    const id3v2 = "ID3\x03\x00\x00\x00\x00\x00\x04" ++ "abcd";
-    const id3v1 = "TAG" ++ @as([125]u8, @splat(0));
-    const file = try std.mem.concat(gpa, u8, &.{ id3v2, &info_frame, data, id3v1 });
-    defer gpa.free(file);
+    const variants = [_]testdata.Xing{
+        .{ .tag = "Info", .lame = .{ .delay = enc_delay, .padding = enc_padding } },
+        .{ .tag = "Xing", .frames = 20, .bytes = @intCast(data.len), .toc = true, .quality = 50, .lame = .{ .delay = enc_delay, .padding = enc_padding } },
+    };
+    for (variants) |x| {
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        try testdata.id3v2(&aw.writer, "abcd", false);
+        try testdata.xingFrame(&aw.writer, .{ .kbps = 128, .sample_rate = 44100 }, x);
+        try aw.writer.writeAll(data);
+        try testdata.apev2(&aw.writer);
+        try testdata.id3v1(&aw.writer);
 
-    const a = try decode(.mp3, gpa, file);
-    defer a.deinit(gpa);
-    const delay = enc_delay + 529;
-    const padding = enc_padding - 529;
-    const raw = ref.frames();
-    try std.testing.expectEqual(raw - delay - padding, a.frames());
-    const want = ref.samples.f32[delay * 2 ..][0 .. a.frames() * 2];
-    const d = diff(.{ .f32 = want }, a.samples);
-    try std.testing.expect(d.max < 1e-5);
+        const a = try decode(.mp3, gpa, aw.written());
+        defer a.deinit(gpa);
+        const delay = enc_delay + 529;
+        const padding = enc_padding - 529;
+        try std.testing.expectEqual(ref.frames() - delay - padding, a.frames());
+        try std.testing.expectEqualSlices(f32, ref.samples.f32[delay * 2 ..][0 .. a.frames() * 2], a.samples.f32);
+    }
 }
 
 // The LAME padding is read from the file: a padding larger than the samples the frames hold
 // must not underflow (it used to panic in Debug / ReleaseSafe).
 test "MP3 - gapless padding larger than the stream" {
     const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    const data = try testReadBytes(io, gpa, "src/Data/Read/Music128.mp3");
+    const data = try testMp3Frames(gpa, 44100, 2, 128, 4000);
     defer gpa.free(data);
-
-    var info_frame: [417]u8 = @splat(0);
-    @memcpy(info_frame[0..4], data[0..4]);
-    const p = 4 + 32;
-    @memcpy(info_frame[p..][0..4], "Info");
-    @memcpy(info_frame[p + 8 ..][0..9], "LAME3.100");
-    // delay 0, padding 0xFFF (4095 - 529 = 3566 samples, more than one 1152-sample frame)
-    info_frame[p + 8 + 21] = 0;
-    info_frame[p + 8 + 22] = 0x0F;
-    info_frame[p + 8 + 23] = 0xFF;
     var sync: @import("Formats/mp3/header.zig").Sync = .{};
     const first = sync.next(data);
     try std.testing.expect(first.len != 0);
-    const file = try std.mem.concat(gpa, u8, &.{ &info_frame, data[0 .. first.skip + first.len] });
-    defer gpa.free(file);
 
-    const a = try decode(.mp3, gpa, file);
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    // delay 0, padding 0xFFF (4095 - 529 = 3566 samples, more than one 1152-sample frame)
+    try testdata.xingFrame(&aw.writer, .{ .kbps = 128, .sample_rate = 44100 }, .{ .lame = .{ .delay = 0, .padding = 0xFFF } });
+    try aw.writer.writeAll(data[0 .. first.skip + first.len]);
+
+    const a = try decode(.mp3, gpa, aw.written());
     defer a.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), a.frames());
 }
@@ -453,8 +601,7 @@ test "MP3 - gapless padding larger than the stream" {
 // twice, which miscounted the frames and could index past the end of a short file.
 test "MP3 - junk before the first frame" {
     const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    const data = try testReadBytes(io, gpa, "src/Data/Read/Music128.mp3");
+    const data = try testMp3Frames(gpa, 44100, 2, 128, 44100 / 2);
     defer gpa.free(data);
     const junk: [300]u8 = @splat(0x55);
 
@@ -482,18 +629,32 @@ test "MP3 - junk before the first frame" {
 // so every slice access is bounds checked.
 test "corrupt files never crash" {
     const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    const files = [_]struct { path: []const u8, tag: AudioTag }{
-        .{ .path = "src/Data/Read/Music22k.mp3", .tag = .mp3 },
-        .{ .path = "src/Data/Read/MusicMono64.mp3", .tag = .mp3 },
-        .{ .path = "src/Data/Read/Tone.qoa", .tag = .qoa },
-        .{ .path = "src/Data/Read/Tone24Extensible.wav", .tag = .wav },
-    };
+    var files: [5]struct { data: []u8, tag: AudioTag } = undefined;
+    var made: usize = 0;
+    defer for (files[0..made]) |f| gpa.free(f.data);
+    files[made] = .{ .data = try testMp3Frames(gpa, 22050, 2, 64, 22050), .tag = .mp3 };
+    made += 1;
+    files[made] = .{ .data = try testMp3Frames(gpa, 48000, 1, 96, 24000), .tag = .mp3 };
+    made += 1;
+    files[made] = .{ .data = try taggedSilentStream(gpa, 6, .{ 576, 1000 }), .tag = .mp3 };
+    made += 1;
+    for ([_]AudioTag{ .qoa, .wav }) |tag| {
+        // QOA stereo; WAV 3-channel 24-bit, which the encoder writes as WAVE_FORMAT_EXTENSIBLE
+        const channels: u16 = if (tag == .qoa) 2 else 3;
+        const src = try testdata.signal(gpa, 44100, channels, 8000, 3);
+        defer src.deinit(gpa);
+        const conv = try src.convert(if (tag == .qoa) .i16 else .i24, gpa);
+        defer conv.deinit(gpa);
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        try conv.encode(tag, &aw.writer, gpa);
+        files[made] = .{ .data = try aw.toOwnedSlice(), .tag = tag };
+        made += 1;
+    }
     var prng: std.Random.DefaultPrng = .init(0x5EED);
     const random = prng.random();
     for (files) |f| {
-        const orig = try testReadBytes(io, gpa, f.path);
-        defer gpa.free(orig);
+        const orig = f.data;
         const buf = try gpa.alloc(u8, orig.len);
         defer gpa.free(buf);
         for (0..60) |iter| {

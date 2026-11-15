@@ -82,8 +82,8 @@ src/Formats/mp3/         mp3.zig (tags, gapless, API)
                          decode: decoder.zig, header.zig, bits.zig, layer3.zig, layer12.zig, synth.zig
                          encode: encoder.zig, analysis.zig, psy.zig, quantize.zig, huffman.zig, bitwriter.zig
                          tables.zig (from minimp3), scalar.zig (oracle)
-src/Data/Read            reference files the tests decode
-src/Data/Write           files the tests write
+src/testdata.zig         test data generated at test time: tones / sweeps / seeded noise,
+                         hand-packed WAV files, hand-built MP3 frames and tags
 ```
 
 ## Tests
@@ -93,10 +93,14 @@ zig build test-release   # ReleaseFast
 zig build bench          # ReleaseFast timings; -Dvector-bytes=16/32/64 to try other widths
 ```
 SIMD follows the Image library's structure; results are in `docs/simd-speedups.md`.
-The library is pure Zig. The reference files in `src/Data/Read` were produced once by code
-independent of it: Python's `wave` module and hand-packed headers (WAV), the reference `qoa.h`
-(QOA), LAME for encoding and dr_mp3 for decoding (MP3). The MP3 encoder's output was also
-checked against dr_mp3 (identical decodes) across MPEG versions, channel counts and bit rates.
+The library is pure Zig, and so is its test data: the repository ships no audio files. The
+tests synthesise signals from a seeded PRNG, pack WAV files field by field (independently of
+the WAV encoder), compare the QOA encoder with a whole-file oracle built on the scalar port of
+the reference search, and build MP3 frames and tags by hand from the standard (they decode to
+silence). Other MP3 decode tests run on streams from this library's own encoder. One test,
+"MP3 - decode matches reference decoder", reports SKIPPED: it needs MP3s from an independent
+encoder with an independent decoder's output, which the repository no longer carries (see
+`THIRD_PARTY.md`).
 
 One test is a compiler canary: "zig canary: vector @intCast i32 -> u8" reports SKIPPED while
 Zig 0.18.0-dev.4's LLVM backend at -O0 miscompiles that cast (see `narrow` in
